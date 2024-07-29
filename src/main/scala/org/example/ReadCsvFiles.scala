@@ -14,8 +14,6 @@ object ReadCsvFiles {
     val file_googlePlaystore = "src/main/scala/org/example/csv_files/googleplaystore.csv"
     val file_googleReviews = "src/main/scala/org/example/csv_files/googleplaystore_user_reviews.csv"
 
-    val folder = "src/main/scala/org/example/csv_files"
-
     // Read the CSV file
     val df1 = spark.read.option("header", "true").csv(path = file_googleReviews)
     val df2 = spark.read.option("header", "true").csv(path = file_googlePlaystore)
@@ -25,31 +23,28 @@ object ReadCsvFiles {
 
     // Average of the column Sentiment_Polarity grouped by App name
     val df_1 = df1.groupBy(col("App"))
-      .agg(
-          avg(col("Sentiment_Polarity").cast("double")).alias("Average_Sentiment_Polarity")
-        )
-    //df_1.show()
+      .agg(avg(col("Sentiment_Polarity").cast("double")).alias("Average_Sentiment_Polarity"))
+      .na.fill(0.0, Seq("Average_Sentiment_Polarity"))
 
-    // Replace NaN with 0
-    val clean_df_1 = df_1.na.fill(0.0, Seq("Average_Sentiment_Polarity"))
-
-    // Show the result
-    clean_df_1.show(30, false)
+    df_1.show(5)
 
     //////////////////////////////////
     // Part 2
 
     val resultDf2 = df2
+      .withColumn("Rating", col("Rating").cast("double"))
+      .withColumn("Rating", when(isnan(col("Rating")), lit(0.0)).otherwise(col("Rating")))
       .filter(col("Rating") >= 4.0)
       .orderBy(col("Rating").desc)
 
     // Show the result
-    //resultDf2.show()
+    resultDf2.show(5)
 
     // Writes the result into a .csv file
     resultDf2.repartition(1)
       .write
       .option("header", "true")
+      .option("delimiter", "§")
       .mode("overwrite")
       .csv("src/main/outputs/best_apps")
 
@@ -58,19 +53,19 @@ object ReadCsvFiles {
 
     // Select and transform the columns
     val transformedDf3 = df2.select(
-      col("App").cast(StringType).as("App"),
+      col("App").cast(StringType),
       split(col("Category"), ",").cast(ArrayType(StringType)).as("Categories"),
-      col("Rating").cast(DoubleType).as("Rating"),
-      col("Reviews").cast(LongType).as("Reviews"),
+      col("Rating").cast(DoubleType),
+      col("Reviews").cast(LongType),
       when(col("Size").endsWith("M"), regexp_replace(col("Size"), "M", "").cast(DoubleType))
         .when(col("Size").endsWith("k"), (regexp_replace(col("Size"), "k", "").cast(DoubleType) / 1024))
         .otherwise(Double.NaN).as("Size"),
-      col("Installs").cast(StringType).as("Installs"),
-      col("Type").cast(StringType).as("Type"),
+      col("Installs").cast(StringType),
+      col("Type").cast(StringType),
       when(col("Price").startsWith("$"), regexp_replace(col("Price"), "\\$", "").cast(DoubleType) * lit(0.9))
         .otherwise(Double.NaN).as("Price"),
       col("Content Rating").cast(StringType).as("Content_Rating"),
-      split(col("Genres"), ";").cast(ArrayType(StringType)).as("genres"),
+      split(col("Genres"), ";").cast(ArrayType(StringType)).as("Genres"),
       to_timestamp(col("Last Updated"), "MMMM d, yyyy").as("Last_Updated"),
       col("Current Ver").cast(StringType).as("Current_Version"),
       col("Android Ver").cast(StringType).as("Minimum_Android_Version")
@@ -84,24 +79,25 @@ object ReadCsvFiles {
       .withColumn("Type", coalesce(col("Type"), lit("NaN")))
       .withColumn("Price", coalesce(col("Price"), lit(Double.NaN)))
       .withColumn("Content_Rating", coalesce(col("Content_Rating"), lit("NaN")))
-      .withColumn("genres", coalesce(col("genres"), array(lit("NaN"))))
+      .withColumn("Genres", coalesce(col("Genres"), array(lit("NaN"))))
       .withColumn("Last_Updated", coalesce(col("Last_Updated"), lit("NaN")))
       .withColumn("Current_Version", coalesce(col("Current_Version"), lit("NaN")))
       .withColumn("Minimum_Android_Version", coalesce(col("Minimum_Android_Version"), lit("NaN")))
       .dropDuplicates("App")
 
+    df_3.show(5)
+
     //////////////////////////////
     // Part 4
 
     // Join the DataFrames from Part 1 and Part 3
-    val combinedDf = df_3.join(df_1, df_3("App") === df_1("App"), "left_outer")
-      .drop(df_1("App"))
+    val part4 = df_3.join(df_1, Seq("App"), "left_outer")
+      .na.fill(0.0, Seq("Average_Sentiment_Polarity"))
 
-    // Replace null values in Average_Sentiment_Polarity with 0.0
-    val finalDf4 = combinedDf.na.fill(0.0, Seq("Average_Sentiment_Polarity"))
-    finalDf4.show()
+    part4.show(5)
+
     // Save the DataFrame as a parquet file with gzip compression
-    finalDf4.write
+    part4.write
       .option("header", "true")
       .option("compression", "gzip")
       .mode("overwrite")
@@ -110,23 +106,18 @@ object ReadCsvFiles {
     ///////////////////////////////
     // Part 5
 
-    // First, join finalDf with finalDf1 to get the Average_Sentiment_Polarity
-    val joinedDf = df_3.join(df_1, lower(df_3("App")) === df_1("app"), "left_outer")
-      .drop(df_1("app"))
+    // Joins df_1 with df_3 to get the Average_Sentiment_Polarity
+    val joinedDf = df_3.join(df_1, df_3("App") === df_1("App"), "left_outer")
+      .drop(df_1("App"))
 
     // Create df_4 with metrics by genre
-    val df_4_metrics = joinedDf.withColumn("Genre", explode(col("Genres")))
+    val df_4 = joinedDf.withColumn("Genre", explode(col("Genres")))
       .groupBy("Genre")
       .agg(
         count("App").alias("Count"),
-        avg("Rating").alias("Average_Rating"),
-        avg(coalesce(col("Average_Sentiment_Polarity"), lit(0.0))).alias("Average_Sentiment_Polarity")
+        round(avg("Rating"), 2).alias("Average_Rating"),
+        round(avg("Average_Sentiment_Polarity"), 2).alias("Average_Sentiment_Polarity")
       )
-
-    // Round the averages to 2 decimal places
-    val df_4 = df_4_metrics
-      .withColumn("Average_Rating", round(col("Average_Rating"), 2))
-      .withColumn("Average_Sentiment_Polarity", round(col("Average_Sentiment_Polarity"), 2))
 
     // Save df_4 as a parquet file with gzip compression
     df_4.write
@@ -139,5 +130,4 @@ object ReadCsvFiles {
     df_4.show(5)
     spark.stop()
   }
-
 }
